@@ -20,7 +20,7 @@ Inform the QMI component of your I2C bus configuration with the following functi
 
     void init_qmi(i2c_master_bus_handle_t bus_handle);
 
-Note: The QMI8658 expects pullups on scl and sda and an I2C frequency less than or equal to 400kHz.
+_Note_: The QMI8658 expects pullups on scl and sda and an I2C frequency less than or equal to 400kHz.
 
 Then, initialize a complimentary filter structure:
 
@@ -57,7 +57,7 @@ Now wait for a reading to become available, and consume the data.
 
     qmi_fifo_update_complimentary_with_readings(&complimentary, readings, readings_available);
 
-Note: If FIFO data is not received promptly once it's available, it will be overwritten once the FIFO buffer runs out of free space. It's recommended to calculate how often you need to read the buffer with this formula:
+_Note_: If FIFO data is not received promptly once it's available, it will be overwritten once the FIFO buffer runs out of free space. It's recommended to calculate how often you need to read the buffer with this formula:
 
     Max seconds between reads = (1536 Byte FIFO Size / 12 Bytes per reading) / ODR of Acc and Gyro
 
