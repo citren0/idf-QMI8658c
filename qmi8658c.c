@@ -6,7 +6,7 @@ static char * TAG = "PCF85063";
 static i2c_master_dev_handle_t dev_handle;
 static qmi_ctx_t qmi_ctx;
 static QueueHandle_t qmi_int_queue = NULL;
-static uint8_t * fifo_buffer;
+static uint8_t * fifo_buffer = NULL;
 static float gx_cal = 0.0, gy_cal = 0.0, gz_cal = 0.0;
 static uint16_t acc_scale_sensitivity_table[4] =
 {
@@ -25,6 +25,37 @@ static uint16_t gyro_scale_sensitivity_table[8] =
     GYRO_SCALE_SENSITIVITY_512DPS,
     GYRO_SCALE_SENSITIVITY_1024DPS,
     GYRO_SCALE_SENSITIVITY_2048DPS
+};
+static float acc_odr_table[16] =
+{
+    8000, // QMI8658C_ACC_ODR_8000
+    4000, // QMI8658C_ACC_ODR_4000
+    2000, // QMI8658C_ACC_ODR_2000
+    1000, // QMI8658C_ACC_ODR_1000
+    500, // QMI8658C_ACC_ODR_500
+    250, // QMI8658C_ACC_ODR_250
+    125, // QMI8658C_ACC_ODR_125
+    62.5, // QMI8658C_ACC_ODR_62_5
+    31.25, // QMI8658C_ACC_ODR_31_25
+    0, // N/A
+    0, // N/A
+    0, // N/A
+    128, // QMI8658C_ACC_ODR_128 = 12
+    21, // QMI8658C_ACC_ODR_21
+    11, // QMI8658C_ACC_ODR_11
+    3, // QMI8658C_ACC_ODR_3
+};
+static float gyro_odr_table[9] =
+{
+    8000, // QMI8658C_GYRO_ODR_8000
+    4000, // QMI8658C_GYRO_ODR_4000
+    2000, // QMI8658C_GYRO_ODR_2000
+    1000, // QMI8658C_GYRO_ODR_1000
+    500, // QMI8658C_GYRO_ODR_500
+    250, // QMI8658C_GYRO_ODR_250
+    125, // QMI8658C_GYRO_ODR_125
+    62.5, // QMI8658C_GYRO_ODR_62_5
+    31.25, // QMI8658C_GYRO_ODR_31_25
 };
 
 
@@ -158,20 +189,38 @@ void qmi_init_complimentary(qmi8658c_complimentary_t * comp)
 /* ----- Public FIFO Related Functions ----- */
 
 
-esp_err_t qmi_fifo_setup(void)
+esp_err_t qmi_fifo_setup(qmi8658c_config_t * config)
 {
-    // Interrupt will push to queue to signal read is ready. Will need to be consumed relatively quickly.
+    if (acc_odr_table[config->acc_odr] != gyro_odr_table[config->gyro_odr])
+    {
+        ESP_LOGE(TAG, "Accelerometer ODR and gyrometer ODR must be the same.");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Save for later.
+    qmi_ctx.acc_scale = config->acc_scale;
+    qmi_ctx.acc_sensitivity = acc_scale_sensitivity_table[config->acc_scale];
+    qmi_ctx.acc_odr = acc_odr_table[config->acc_odr];
+
+    qmi_ctx.gyro_scale = config->gyro_scale;
+    qmi_ctx.gyro_sensitivity = gyro_scale_sensitivity_table[config->gyro_scale];
+    qmi_ctx.gyro_odr = gyro_odr_table[config->gyro_odr];
+
+    // Interrupt will push to queue to signal read is ready.
     if (!qmi_int_queue)
     {
         qmi_int_queue = xQueueCreate(10, sizeof(uint8_t));
     }
 
+    // Reset and give time for boot-up.
     ESP_ERROR_CHECK(qmi_reset());
 
     vTaskDelay(pdMS_TO_TICKS(150));
 
+    // Verify we have the correct chip.
     ESP_ERROR_CHECK(qmi_check_whoami());
 
+    // Issue config command set.
     uint8_t ctrl1 = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_CTRL1, &ctrl1));
     ctrl1 &= ~(1 << 0); // Enable internal oscillator.
@@ -181,42 +230,29 @@ esp_err_t qmi_fifo_setup(void)
     ctrl1 |=  (1 << 2); // FIFO interrupt to INT1.
     ESP_ERROR_CHECK(send_command(QMI8658_CTRL1, ctrl1));
 
-    qmi8658c_config_t config =
-    {
-        .mode = QMI8658C_MODE_DUAL,
-        .acc_scale = QMI8658C_ACC_SCALE_4G,
-        .acc_odr = QMI8658C_ACC_ODR_500,
-        .gyro_scale = QMI8658C_GYRO_SCALE_256DPS,
-        .gyro_odr = QMI8658C_GYRO_ODR_500,
-    };
-    qmi_ctx.acc_scale = config.acc_scale;
-    qmi_ctx.acc_sensitivity = acc_scale_sensitivity_table[config.acc_scale];
-    qmi_ctx.gyro_scale = config.gyro_scale;
-    qmi_ctx.gyro_sensitivity = gyro_scale_sensitivity_table[config.gyro_scale];
-
     uint8_t ctrl2 = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_CTRL2, &ctrl2));
-    ctrl2 &= ~(0x0F);
-    ctrl2 |= config.acc_odr;
-    ctrl2 &= ~(0x70);
-    ctrl2 |= (config.acc_scale << 4);
+    ctrl2 &= ~(0x0F); // Clear ODR bits.
+    ctrl2 |= config->acc_odr; // Set ODR bits.
+    ctrl2 &= ~(0x70); // Clear scale bits.
+    ctrl2 |= (config->acc_scale << 4); // Set scale bits.
     ESP_ERROR_CHECK(send_command(QMI8658_CTRL2, ctrl2));
 
     uint8_t ctrl3 = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_CTRL3, &ctrl3));
-    ctrl3 &= ~(0x0F);
-    ctrl3 |= config.gyro_odr;
-    ctrl3 &= ~(0x70);
-    ctrl3 |= (config.gyro_scale << 4);
+    ctrl3 &= ~(0x0F); // Clear ODR bits.
+    ctrl3 |= config->gyro_odr; // Set ODR bits.
+    ctrl3 &= ~(0x70); // Clear scale bits.
+    ctrl3 |= (config->gyro_scale << 4); // Set scale bits.
     ESP_ERROR_CHECK(send_command(QMI8658_CTRL3, ctrl3));
 
     uint8_t ctrl5 = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_CTRL5, &ctrl5));
     ctrl5 |= (1 << 0); // Enable accelerometer low pass filter.
-    ctrl5 &= ~(0b11 << 1);
-    ctrl5 |= (LPF_MODE_5P39 << 1); // set mode for accelerometer low pass filter.
+    ctrl5 &= ~(0b11 << 1); // Clear LPF bits.
+    ctrl5 |= (LPF_MODE_5P39 << 1); // Set mode for accelerometer low pass filter.
     ctrl5 |= (1 << 4); // Enable gyro low pass filter.
-    ctrl5 &= ~(0b11 << 5);
+    ctrl5 &= ~(0b11 << 5); // Clear LPF bits.
     ctrl5 |= (LPF_MODE_5P39 << 5); // Set mode for gyro low pass filter.
     ESP_ERROR_CHECK(send_command(QMI8658_CTRL5, ctrl5));
 
@@ -244,9 +280,9 @@ esp_err_t qmi_fifo_setup(void)
     uint8_t fifo_ctrl = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_FIFO_CTRL, &fifo_ctrl));
     fifo_ctrl &= ~(1 << 7); // Set FIFO to write mode.
-    fifo_ctrl &= ~(0b11 << 2);
+    fifo_ctrl &= ~(0b11 << 2); // Clear FIFO depth bits.
     fifo_ctrl |= (FIFO_SIZE_128 << 2); // Set sample depth of FIFO.
-    fifo_ctrl &= ~(0b11 << 0);
+    fifo_ctrl &= ~(0b11 << 0); // Clear FIFO mode bits.
     fifo_ctrl |= (FIFO_MODE_STREAM << 0); // Set mode of FIFO.
     ESP_ERROR_CHECK(send_command(QMI8658_FIFO_CTRL, fifo_ctrl));
 
@@ -259,10 +295,14 @@ esp_err_t qmi_fifo_setup(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&gpio_conf));
-    gpio_install_isr_service(0); // Should already be configured. Don't error check in case it is.
+    gpio_install_isr_service(0); // Might already be configured. Don't error check in case it is.
     ESP_ERROR_CHECK(gpio_isr_handler_add(QMI_INTERRUPT1_PIN, qmi_ae_interrupt, NULL));
 
-    fifo_buffer = (uint8_t *)malloc(QMI_FIFO_TOTAL_SIZE);
+    // No memory leaks.
+    if (!fifo_buffer)
+    {
+        fifo_buffer = (uint8_t *)malloc(QMI_FIFO_TOTAL_SIZE);
+    }
 
     return ESP_OK;
 }
@@ -276,6 +316,7 @@ esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_
 
         uint16_t fifo_bytes_available = qmi_get_fifo_bytes_available();
 
+        // Make sure there are bytes to read, then do 2 basic sanity checks.
         if (
             fifo_bytes_available == 0 ||
             fifo_bytes_available % sizeof(qmi8658c_fifo_reading_t) != 0 ||
@@ -315,7 +356,7 @@ void qmi_fifo_update_complimentary_with_readings(qmi8658c_complimentary_t * comp
 {
     float ax, ay, az, gx, gy, gz, apitch, aroll;
 
-    float deltaT = 1.0 / 500.0; // ODR 500 for gyro and acc.
+    float deltaT = 1.0 / qmi_ctx.acc_odr; // Assume acc and gyro odr are the same.
 
     for (int i = 0; i < num_readings; i++)
     {
@@ -371,7 +412,10 @@ void qmi_deinit_fifo(void)
 {
     vQueueDelete(qmi_int_queue);
     ESP_ERROR_CHECK(gpio_isr_handler_remove(QMI_INTERRUPT1_PIN));
-    free(fifo_buffer);
+    if (fifo_buffer)
+    {
+        free(fifo_buffer);
+    }
 }
 
 

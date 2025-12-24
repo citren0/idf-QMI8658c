@@ -168,8 +168,10 @@ typedef struct
 {
     uint16_t acc_sensitivity;
     uint8_t acc_scale;
+    uint16_t acc_odr;
     uint16_t gyro_sensitivity;
     uint8_t gyro_scale;
+    uint16_t gyro_odr;
     uint8_t who_am_i;
     uint8_t revision;
 } qmi_ctx_t;
@@ -215,11 +217,10 @@ typedef struct
 } qmi8658c_fifo_reading_t;
 
 
-
 void init_qmi(i2c_master_bus_handle_t bus_handle);
 void qmi_init_complimentary(qmi8658c_complimentary_t * comp);
 
-esp_err_t qmi_fifo_setup(void);
+esp_err_t qmi_fifo_setup(qmi8658c_config_t * config);
 void qmi_deinit_fifo(void);
 uint8_t qmi_fifo_is_read_ready(void);
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available);
