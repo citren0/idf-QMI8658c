@@ -7,6 +7,7 @@ static i2c_master_dev_handle_t dev_handle;
 static qmi_ctx_t qmi_ctx;
 static QueueHandle_t qmi_int_queue = NULL;
 static uint8_t * fifo_buffer;
+static float gx_cal = 0.0, gy_cal = 0.0, gz_cal = 0.0;
 static uint16_t acc_scale_sensitivity_table[4] =
 {
     ACC_SCALE_SENSITIVITY_2G,
@@ -319,24 +320,51 @@ void qmi_fifo_update_complimentary_with_readings(qmi8658c_complimentary_t * comp
     for (int i = 0; i < num_readings; i++)
     {
         gx = ((float)((int16_t)((readings[i].gx_h << 8) | readings[i].gx_l))) / qmi_ctx.gyro_sensitivity;
+        gx -= gx_cal;
         gy = ((float)((int16_t)((readings[i].gy_h << 8) | readings[i].gy_l))) / qmi_ctx.gyro_sensitivity;
+        gy -= gy_cal;
         gz = ((float)((int16_t)((readings[i].gz_h << 8) | readings[i].gz_l))) / qmi_ctx.gyro_sensitivity;
+        gz -= gz_cal;
 
         ax = ((float)(int16_t)((readings[i].ax_h << 8) | readings[i].ax_l)) / qmi_ctx.acc_sensitivity;
         ay = ((float)(int16_t)((readings[i].ay_h << 8) | readings[i].ay_l)) / qmi_ctx.acc_sensitivity;
         az = ((float)(int16_t)((readings[i].az_h << 8) | readings[i].az_l)) / qmi_ctx.acc_sensitivity;
 
-        aroll = 180 - RAD_TO_DEG(atan2(ay, az));
-        apitch = 180 - RAD_TO_DEG(atan2(ax, az));
-
-        // Gyroscope Y is roll, x is pitch, z is yaw.
+        aroll = RAD_TO_DEG(atan2(ay, sqrt(pow(ax, 2) + pow(az, 2))));
+        apitch = RAD_TO_DEG(atan2(ax, sqrt(pow(ay, 2) + pow(az, 2))));
 
         complimentary->pitch = (QMI_COMP_RATIO * ((deltaT * gx) + complimentary->pitch)) + ((1.0 - QMI_COMP_RATIO) * apitch);
-        complimentary->roll = (QMI_COMP_RATIO * ((deltaT * gy) + complimentary->roll)) + ((1.0 - QMI_COMP_RATIO) * aroll);
-        complimentary->yaw += (deltaT * gz);
+        complimentary->roll = ((QMI_COMP_RATIO * ((deltaT * gy) + complimentary->roll)) + ((1.0 - QMI_COMP_RATIO) * aroll));
+        complimentary->yaw += -(deltaT * gz);
     }
 
     complimentary->last_update = esp_timer_get_time();
+}
+
+void qmi_calibrate_with_fifo(void)
+{
+    // Allow data to accumulate.
+    while (qmi_fifo_is_read_ready() == 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    uint16_t readings_available = 0;
+    qmi8658c_fifo_reading_t * readings;
+    ESP_ERROR_CHECK(qmi_fifo_consume(&readings, &readings_available));
+
+    float gx_total = 0.0, gy_total = 0.0, gz_total = 0.0;
+
+    for (int i = 0; i < readings_available; i++)
+    {
+        gx_total += -((float)((int16_t)((readings[i].gx_h << 8) | readings[i].gx_l))) / qmi_ctx.gyro_sensitivity;
+        gy_total += ((float)((int16_t)((readings[i].gy_h << 8) | readings[i].gy_l))) / qmi_ctx.gyro_sensitivity;
+        gz_total += ((float)((int16_t)((readings[i].gz_h << 8) | readings[i].gz_l))) / qmi_ctx.gyro_sensitivity;
+    }
+
+    gx_cal = gx_total / readings_available;
+    gy_cal = gy_total / readings_available;
+    gz_cal = gz_total / readings_available;
 }
 
 void qmi_deinit_fifo(void)
@@ -399,9 +427,9 @@ esp_err_t qmi_get_gyro(float * x, float * y, float * z)
     err |= read_register(QMI8658_GYR_Z_L, &gyr_z_l);
     err |= read_register(QMI8658_GYR_Z_H, &gyr_z_h);
 
-    int16_t gyr_x = (int16_t)((gyr_x_h << 8) | gyr_x_l);
-    int16_t gyr_y = (int16_t)((gyr_y_h << 8) | gyr_y_l);
-    int16_t gyr_z = (int16_t)((gyr_z_h << 8) | gyr_z_l);
+    int16_t gyr_x = (int16_t)((gyr_x_h << 8) | gyr_x_l) - gx_cal;
+    int16_t gyr_y = (int16_t)((gyr_y_h << 8) | gyr_y_l) - gy_cal;
+    int16_t gyr_z = (int16_t)((gyr_z_h << 8) | gyr_z_l) - gz_cal;
 
     *x = (float)gyr_x / qmi_ctx.gyro_sensitivity;
     *y = (float)gyr_y / qmi_ctx.gyro_sensitivity;

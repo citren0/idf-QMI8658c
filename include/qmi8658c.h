@@ -14,12 +14,13 @@
 #define PI                          3.14159265
 
 #define RAD_TO_DEG(x)               (x * (360.0 / (2.0 * PI)))
+#define DEG_TO_RAD(x)               (x * ((2.0 * PI) / 360.0))
 #define MS_TO_S(x)                  ((float)(x) / 1000000.0)
 
 #define QMI_I2C_SCL                 GPIO_NUM_10
 #define QMI_I2C_SDA                 GPIO_NUM_11
 #define QMI_I2C_NUM                 I2C_NUM_0
-#define QMI_I2C_FREQ_HZ             400000
+#define QMI_I2C_FREQ_HZ             200000
 #define QMI_I2C_TIMEOUT_MS          1000
 #define QMI8658C_ADDR               0x6B
 #define QMI_INTERRUPT1_PIN          GPIO_NUM_38
@@ -223,6 +224,7 @@ void qmi_deinit_fifo(void);
 uint8_t qmi_fifo_is_read_ready(void);
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available);
 void qmi_fifo_update_complimentary_with_readings(qmi8658c_complimentary_t * complimentary, qmi8658c_fifo_reading_t * readings, uint16_t num_readings);
+void qmi_calibrate_with_fifo(void);
 
 esp_err_t qmi_get_accel(float * x, float * y, float * z);
 esp_err_t qmi_get_gyro(float * x, float * y, float * z);
