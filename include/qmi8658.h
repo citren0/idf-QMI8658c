@@ -1,21 +1,14 @@
 
-#ifndef QMI8658C_H_
-#define QMI8658C_H_
+#ifndef QMI8658_H_
+#define QMI8658_H_
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "freertos/FreeRTOS.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "esp_err.h"
-#include "esp_timer.h"
-#include "driver/gpio.h"
-#include "math.h"
 
-#define PI                          3.14159265
+#define PI                          3.14159265f
 
-#define RAD_TO_DEG(x)               (x * (360.0 / (2.0 * PI)))
-#define DEG_TO_RAD(x)               (x * ((2.0 * PI) / 360.0))
-#define MS_TO_S(x)                  ((float)(x) / 1000000.0)
+#define RAD_TO_DEG(x)               (x * (360.0f / (2.0f * PI)))
+#define DEG_TO_RAD(x)               (x * ((2.0f * PI) / 360.0f))
 
 #define QMI_I2C_SCL                 GPIO_NUM_10
 #define QMI_I2C_SDA                 GPIO_NUM_11
@@ -28,6 +21,9 @@
 #define QMI_FIFO_WATERMARK_LEVEL    64 // 64 samples of 12 bytes each, ~700 bytes to read per interrupt.
 #define QMI_FIFO_TOTAL_SIZE         1536
 #define QMI_COMP_RATIO              0.98
+#define QMI_POST_RESET_DELAY        150
+#define QMI_WHO_AM_I                0x05
+#define QMI_REVISION_ID             0x7C
 
 /* General purpose registers */
 #define QMI8658_WHO_AM_I 0x00
@@ -217,10 +213,12 @@ typedef struct
 } qmi8658c_fifo_reading_t;
 
 
-void init_qmi(i2c_master_bus_handle_t bus_handle);
+void qmi_i2c_init(i2c_master_bus_handle_t bus_handle);
 void qmi_init_complimentary(qmi8658c_complimentary_t * comp);
 
 esp_err_t qmi_fifo_setup(qmi8658c_config_t * config);
+void qmi_go_to_sleep(void);
+void qmi_wakeup(void);
 void qmi_deinit_fifo(void);
 uint8_t qmi_fifo_is_read_ready(void);
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available);
@@ -232,4 +230,4 @@ esp_err_t qmi_get_gyro(float * x, float * y, float * z);
 esp_err_t qmi_get_temp(float * temperature);
 esp_err_t qmi_read_all_data(qmi8658c_data_t * data);
 
-#endif // QMI8658C_H_
+#endif // QMI8658_H_

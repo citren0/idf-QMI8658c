@@ -1,13 +1,22 @@
 
-#include "qmi8658c.h"
+#include "qmi8658.h"
+#include "freertos/FreeRTOS.h"
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
+#include "math.h"
+#include "i2c_lock.h"
 
 
-static char * TAG = "PCF85063";
+static char * TAG = "QMI8658";
 static i2c_master_dev_handle_t dev_handle;
 static qmi_ctx_t qmi_ctx;
 static QueueHandle_t qmi_int_queue = NULL;
 static uint8_t * fifo_buffer = NULL;
+static bool is_initialized = false;
 static float gx_cal = 0.0, gy_cal = 0.0, gz_cal = 0.0;
+
 static uint16_t acc_scale_sensitivity_table[4] =
 {
     ACC_SCALE_SENSITIVITY_2G,
@@ -63,15 +72,19 @@ static esp_err_t qmi_read_reg(uint8_t reg_addr, uint8_t * data, size_t len)
 {
     uint8_t send_buf[1] = { reg_addr };
 
+    lock_i2c();
     esp_err_t ret = i2c_master_transmit_receive(dev_handle, send_buf, sizeof(send_buf), data, len, pdMS_TO_TICKS(QMI_I2C_TIMEOUT_MS));
-    
+    unlock_i2c();
+
     return ret;
 }
 
 
 static esp_err_t qmi_write(uint8_t * data, size_t len)
 {
+    lock_i2c();
     esp_err_t ret = i2c_master_transmit(dev_handle, data, len, pdMS_TO_TICKS(QMI_I2C_TIMEOUT_MS));
+    unlock_i2c();
     return ret;
 }
 
@@ -101,7 +114,7 @@ static esp_err_t qmi_check_whoami(void)
 {
     uint8_t who_am_i = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_WHO_AM_I, &who_am_i));
-    if (who_am_i != 0x05)
+    if (who_am_i != QMI_WHO_AM_I)
     {
         ESP_LOGE(TAG, "This isn't a QMI8658.");
         return ESP_FAIL;
@@ -109,7 +122,7 @@ static esp_err_t qmi_check_whoami(void)
 
     uint8_t revision = 0;
     ESP_ERROR_CHECK(read_register(QMI8658_REVISION, &revision));
-    if (revision != 0x7C)
+    if (revision != QMI_REVISION_ID)
     {
         ESP_LOGE(TAG, "This QMI revision is not supported by this driver.");
         return ESP_FAIL;
@@ -165,8 +178,13 @@ static esp_err_t qmi_disable_fifo_read_mode(void)
 /* ----- Public General Purpose Setup ----- */
 
 
-void init_qmi(i2c_master_bus_handle_t bus_handle)
+void qmi_i2c_init(i2c_master_bus_handle_t bus_handle)
 {
+    if (is_initialized == true)
+    {
+        return;
+    }
+
     // Add device to I2C bus.
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -179,6 +197,7 @@ void init_qmi(i2c_master_bus_handle_t bus_handle)
 
 void qmi_init_complimentary(qmi8658c_complimentary_t * comp)
 {
+    esp_timer_init(); // Required. Don't error check though because it should already be enabled.
     comp->last_update = esp_timer_get_time();
     comp->pitch = 0.0;
     comp->yaw = 0.0;
@@ -215,7 +234,7 @@ esp_err_t qmi_fifo_setup(qmi8658c_config_t * config)
     // Reset and give time for boot-up.
     ESP_ERROR_CHECK(qmi_reset());
 
-    vTaskDelay(pdMS_TO_TICKS(150));
+    vTaskDelay(pdMS_TO_TICKS(QMI_POST_RESET_DELAY));
 
     // Verify we have the correct chip.
     ESP_ERROR_CHECK(qmi_check_whoami());
@@ -305,6 +324,34 @@ esp_err_t qmi_fifo_setup(qmi8658c_config_t * config)
     }
 
     return ESP_OK;
+}
+
+void qmi_go_to_sleep(void)
+{
+    if (is_initialized == false)
+    {
+        return;
+    }
+
+    uint8_t ctrl7 = 0;
+    ESP_ERROR_CHECK(read_register(QMI8658_CTRL7, &ctrl7));
+    ctrl7 &= ~(1 << 1); // Disable gyrometer.
+    ctrl7 &= ~(1 << 0); // Disable Accelerometer.
+    ESP_ERROR_CHECK(send_command(QMI8658_CTRL7, ctrl7));
+}
+
+void qmi_wakeup(void)
+{
+    if (is_initialized == false)
+    {
+        return;
+    }
+
+    uint8_t ctrl7 = 0;
+    ESP_ERROR_CHECK(read_register(QMI8658_CTRL7, &ctrl7));
+    ctrl7 |= (1 << 1); // Enable gyrometer.
+    ctrl7 |= (1 << 0); // Enable Accelerometer.
+    ESP_ERROR_CHECK(send_command(QMI8658_CTRL7, ctrl7));
 }
 
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available)

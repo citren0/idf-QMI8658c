@@ -18,7 +18,7 @@ To fetch this repo, add it as a submodule in your idf project's components folde
 
 Inform the QMI component of your I2C bus configuration with the following function:
 
-    void init_qmi(i2c_master_bus_handle_t bus_handle);
+    void qmi_i2c_init(i2c_master_bus_handle_t bus_handle);
 
 _Note_: The QMI8658 expects pullups on scl and sda and an I2C frequency less than or equal to 400kHz.
 
