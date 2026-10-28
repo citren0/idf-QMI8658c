@@ -12,7 +12,7 @@
 static char * TAG = "QMI8658";
 static i2c_master_dev_handle_t dev_handle;
 static qmi_ctx_t qmi_ctx;
-static QueueHandle_t qmi_int_queue = NULL;
+static SemaphoreHandle_t qmi_int_read_ready = NULL;
 static uint8_t * fifo_buffer = NULL;
 static bool is_initialized = false;
 static float gx_cal = 0.0, gy_cal = 0.0, gz_cal = 0.0;
@@ -72,9 +72,12 @@ static esp_err_t qmi_read_reg(uint8_t reg_addr, uint8_t * data, size_t len)
 {
     uint8_t send_buf[1] = { reg_addr };
 
-    lock_i2c();
+    BaseType_t did_lock = lock_i2c();
     esp_err_t ret = i2c_master_transmit_receive(dev_handle, send_buf, sizeof(send_buf), data, len, pdMS_TO_TICKS(QMI_I2C_TIMEOUT_MS));
-    unlock_i2c();
+    if (did_lock == pdTRUE)
+    {
+        unlock_i2c();
+    }
 
     return ret;
 }
@@ -82,9 +85,13 @@ static esp_err_t qmi_read_reg(uint8_t reg_addr, uint8_t * data, size_t len)
 
 static esp_err_t qmi_write(uint8_t * data, size_t len)
 {
-    lock_i2c();
+    BaseType_t did_lock = lock_i2c();
     esp_err_t ret = i2c_master_transmit(dev_handle, data, len, pdMS_TO_TICKS(QMI_I2C_TIMEOUT_MS));
-    unlock_i2c();
+    if (did_lock == pdTRUE)
+    {
+        unlock_i2c();
+    }
+
     return ret;
 }
 
@@ -134,12 +141,7 @@ static esp_err_t qmi_check_whoami(void)
 
 static void IRAM_ATTR qmi_ae_interrupt(void * arg)
 {
-    // Dummy value to signify read is ready.
-    uint8_t data = 1;
-    if (qmi_int_queue)
-    {
-        xQueueSendFromISR(qmi_int_queue, &data, NULL);
-    }
+    xSemaphoreGiveFromISR(qmi_int_read_ready, NULL);
 }
 
 
@@ -225,10 +227,10 @@ esp_err_t qmi_fifo_setup(qmi8658c_config_t * config)
     qmi_ctx.gyro_sensitivity = gyro_scale_sensitivity_table[config->gyro_scale];
     qmi_ctx.gyro_odr = gyro_odr_table[config->gyro_odr];
 
-    // Interrupt will push to queue to signal read is ready.
-    if (!qmi_int_queue)
+    // Interrupt will give semaphore to signal read is ready.
+    if (!qmi_int_read_ready)
     {
-        qmi_int_queue = xQueueCreate(10, sizeof(uint8_t));
+        qmi_int_read_ready = xSemaphoreCreateBinary();
     }
 
     // Reset and give time for boot-up.
@@ -356,43 +358,35 @@ void qmi_wakeup(void)
 
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available)
 {
-    uint8_t recv;
-    if (qmi_int_queue && (xQueueReceive(qmi_int_queue, &recv, pdMS_TO_TICKS(QMI_FIFO_QUEUE_TIMEOUT)) == pdPASS))
-    {
-        esp_err_t err = 0;
+    esp_err_t err = 0;
 
-        uint16_t fifo_bytes_available = qmi_get_fifo_bytes_available();
+    uint16_t fifo_bytes_available = qmi_get_fifo_bytes_available();
 
-        // Make sure there are bytes to read, then do 2 basic sanity checks.
-        if (
-            fifo_bytes_available == 0 ||
-            fifo_bytes_available % sizeof(qmi8658c_fifo_reading_t) != 0 ||
-            fifo_bytes_available > QMI_FIFO_TOTAL_SIZE
-        ) {
-            return ESP_FAIL;
-        }
-
-        ESP_ERROR_CHECK(qmi_enable_fifo_read_mode());
-
-        err |= qmi_read_reg(QMI8658_FIFO_DATA, fifo_buffer, fifo_bytes_available);
-
-        ESP_ERROR_CHECK(qmi_disable_fifo_read_mode());
-
-        *readings_available = fifo_bytes_available / sizeof(qmi8658c_fifo_reading_t);
-        *buf = (qmi8658c_fifo_reading_t *)fifo_buffer;
-
-        return err;
-    }
-    else
-    {
+    // Make sure there are bytes to read, then do 2 basic sanity checks.
+    if (
+        fifo_bytes_available == 0 ||
+        fifo_bytes_available % sizeof(qmi8658c_fifo_reading_t) != 0 ||
+        fifo_bytes_available > QMI_FIFO_TOTAL_SIZE
+    ) {
+        ESP_LOGI(TAG, "Fail 1");
         return ESP_FAIL;
     }
+
+    ESP_ERROR_CHECK(qmi_enable_fifo_read_mode());
+
+    err |= qmi_read_reg(QMI8658_FIFO_DATA, fifo_buffer, fifo_bytes_available);
+
+    ESP_ERROR_CHECK(qmi_disable_fifo_read_mode());
+
+    *readings_available = fifo_bytes_available / sizeof(qmi8658c_fifo_reading_t);
+    *buf = (qmi8658c_fifo_reading_t *)fifo_buffer;
+
+    return err;
 }
 
 uint8_t qmi_fifo_is_read_ready(void)
 {
-    uint8_t peek;
-    if (qmi_int_queue && (xQueuePeek(qmi_int_queue, &peek, pdMS_TO_TICKS(QMI_FIFO_QUEUE_TIMEOUT)) == pdPASS))
+    if (xSemaphoreTake(qmi_int_read_ready, pdMS_TO_TICKS(100)))
     {
         return 1;
     }
@@ -429,7 +423,7 @@ void qmi_fifo_update_complimentary_with_readings(qmi8658c_complimentary_t * comp
     complimentary->last_update = esp_timer_get_time();
 }
 
-void qmi_calibrate_with_fifo(void)
+int qmi_calibrate_with_fifo(void)
 {
     // Allow data to accumulate.
     while (qmi_fifo_is_read_ready() == 0)
@@ -439,7 +433,12 @@ void qmi_calibrate_with_fifo(void)
 
     uint16_t readings_available = 0;
     qmi8658c_fifo_reading_t * readings;
-    ESP_ERROR_CHECK(qmi_fifo_consume(&readings, &readings_available));
+    esp_err_t err = qmi_fifo_consume(&readings, &readings_available);
+    if (err)
+    {
+        ESP_LOGE(TAG, "Failed to calibrate with fifo.");
+        return 1;
+    }
 
     float gx_total = 0.0, gy_total = 0.0, gz_total = 0.0;
 
@@ -453,15 +452,21 @@ void qmi_calibrate_with_fifo(void)
     gx_cal = gx_total / readings_available;
     gy_cal = gy_total / readings_available;
     gz_cal = gz_total / readings_available;
+
+    return 0;
 }
 
 void qmi_deinit_fifo(void)
 {
-    vQueueDelete(qmi_int_queue);
     ESP_ERROR_CHECK(gpio_isr_handler_remove(QMI_INTERRUPT1_PIN));
+
+    vSemaphoreDelete(qmi_int_read_ready);
+    qmi_int_read_ready = NULL;
+    
     if (fifo_buffer)
     {
         free(fifo_buffer);
+        fifo_buffer = NULL;
     }
 }
 

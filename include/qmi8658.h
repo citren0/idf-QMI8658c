@@ -223,7 +223,7 @@ void qmi_deinit_fifo(void);
 uint8_t qmi_fifo_is_read_ready(void);
 esp_err_t qmi_fifo_consume(qmi8658c_fifo_reading_t * * buf, uint16_t * readings_available);
 void qmi_fifo_update_complimentary_with_readings(qmi8658c_complimentary_t * complimentary, qmi8658c_fifo_reading_t * readings, uint16_t num_readings);
-void qmi_calibrate_with_fifo(void);
+int qmi_calibrate_with_fifo(void);
 
 esp_err_t qmi_get_accel(float * x, float * y, float * z);
 esp_err_t qmi_get_gyro(float * x, float * y, float * z);
