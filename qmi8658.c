@@ -194,6 +194,8 @@ void qmi_i2c_init(i2c_master_bus_handle_t bus_handle)
         .scl_speed_hz = QMI_I2C_FREQ_HZ,
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_config, &dev_handle));
+
+    is_initialized = true;
 }
 
 
